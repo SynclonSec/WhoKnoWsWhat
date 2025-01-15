@@ -8,12 +8,14 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/joho/godotenv"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -31,13 +33,14 @@ var (
 	}
 	proxyIndex = 0
 	proxyMutex sync.Mutex
+	logger     = logrus.New()
 )
 
 func initializeDB() {
 	var err error
 	db, err = sql.Open("sqlite3", DB_NAME)
 	if err != nil {
-		log.Fatalf("Failed to open database: %v", err)
+		logger.Fatalf("Failed to open database: %v", err)
 	}
 	createUsersTable()
 	createLinkedAccountsTable()
@@ -47,6 +50,8 @@ func createUsersTable() {
 	query := `
 	CREATE TABLE IF NOT EXISTS users (
 		userid TEXT PRIMARY KEY,
+		username TEXT,
+		discriminator TEXT,
 		bio TEXT,
 		avatar TEXT,
 		banner TEXT,
@@ -55,7 +60,11 @@ func createUsersTable() {
 	`
 	_, err := db.Exec(query)
 	if err != nil {
-		log.Fatalf("Failed to create users table: %v", err)
+		logger.Fatalf("Failed to create users table: %v", err)
+	}
+	_, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_users_userid ON users (userid)")
+	if err != nil {
+		logger.Fatalf("Failed to create index on users table: %v", err)
 	}
 }
 
@@ -72,7 +81,11 @@ func createLinkedAccountsTable() {
 	`
 	_, err := db.Exec(query)
 	if err != nil {
-		log.Fatalf("Failed to create linked_accounts table: %v", err)
+		logger.Fatalf("Failed to create linked_accounts table: %v", err)
+	}
+	_, err = db.Exec("CREATE INDEX IF NOT EXISTS idx_linked_accounts_userid ON linked_accounts (userid)")
+	if err != nil {
+		logger.Fatalf("Failed to create index on linked_accounts table: %v", err)
 	}
 }
 
@@ -225,22 +238,49 @@ func getIdentifyPayload(token string) IdentifyPayload {
 				ReleaseChannel       string `json:"release_channel"`
 				ClientBuildNumber    int    `json:"client_build_number"`
 				ClientEventSource    *int   `json:"client_event_source"`
-			} `json:"properties"`
-			Presence struct {
+			}{
+				Os:                    "Android",
+				Browser:              "Discord Android",
+				Device:               "Android",
+				SystemLocale:         "ja-JP",
+				BrowserUserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+				BrowserVersion:       "122.0.0.0",
+				OsVersion:            "",
+				Referrer:             "",
+				ReferringDomain:      "",
+				ReferrerCurrent:      "",
+				ReferringDomainCurrent: "",
+				ReleaseChannel:       "stable",
+				ClientBuildNumber:    263582,
+				ClientEventSource:    nil,
+			},
+			Presence: struct {
 				Status string        `json:"status"`
 				Since  int           `json:"since"`
 				Activities []interface{} `json:"activities"`
 				Afk     bool         `json:"afk"`
-			} `json:"presence"`
-			Compress     bool `json:"compress"`
-			ClientState  struct {
+			}{
+				Status:    "invisible",
+				Since:     0,
+				Activities: []interface{}{},
+				Afk:       false,
+			},
+			Compress:     false,
+			ClientState: struct {
 				GuildVersions                map[string]interface{} `json:"guild_versions"`
 				HighestLastMessageID        string                 `json:"highest_last_message_id"`
 				ReadStateVersion            int                    `json:"read_state_version"`
 				UserGuildSettingsVersion    int                    `json:"user_guild_settings_version"`
 				PrivateChannelsVersion      string                 `json:"private_channels_version"`
 				ApiCodeVersion              int                    `json:"api_code_version"`
-			} `json:"client_state"`
+			}{
+				GuildVersions:                map[string]interface{}{},
+				HighestLastMessageID:         "0",
+				ReadStateVersion:            0,
+				UserGuildSettingsVersion:     -1,
+				PrivateChannelsVersion:      "0",
+				ApiCodeVersion:              0,
+			},
 		}{
 			Token:         token,
 			Capabilities:  16381,
@@ -398,7 +438,7 @@ func getMembers(serverID, channelID, token string) ([]string, error) {
 	return users, nil
 }
 
-func insertUserData(userID, userBio, avatar, banner string, accentColor int, connectedAccounts []map[string]interface{}, linkedWebsites []string) error {
+func insertUserData(userID, userBio, avatar, banner string, accentColor int, username, discriminator string, connectedAccounts []map[string]interface{}, linkedWebsites []string) error {
 	dbMutex.Lock()
 	defer dbMutex.Unlock()
 
@@ -408,7 +448,7 @@ func insertUserData(userID, userBio, avatar, banner string, accentColor int, con
 	}
 	defer tx.Rollback()
 
-	_, err = tx.Exec("INSERT OR REPLACE INTO users (userid, bio, avatar, banner, accent_color) VALUES (?, ?, ?, ?, ?)", userID, userBio, avatar, banner, accentColor)
+	_, err = tx.Exec("INSERT OR REPLACE INTO users (userid, username, discriminator, bio, avatar, banner, accent_color) VALUES (?, ?, ?, ?, ?, ?, ?)", userID, username, discriminator, userBio, avatar, banner, accentColor)
 	if err != nil {
 		return err
 	}
@@ -490,7 +530,7 @@ func fetchAndStoreUserData(token, userID string, wg *sync.WaitGroup) {
 	defer wg.Done()
 	profileData, err := getUserProfile(token, userID)
 	if err != nil {
-		log.Printf("Error fetching user profile for user %s: %v", userID, err)
+		logger.Printf("Error fetching user profile for user %s: %v", userID, err)
 		return
 	}
 
@@ -499,6 +539,8 @@ func fetchAndStoreUserData(token, userID string, wg *sync.WaitGroup) {
 	avatar := userData["avatar"].(string)
 	banner := userData["banner"].(string)
 	accentColor := int(userData["accent_color"].(float64))
+	username := userData["username"].(string)
+	discriminator := userData["discriminator"].(string)
 	connectedAccounts := profileData["connected_accounts"].([]interface{})
 	linkedWebsites := []string{}
 	for _, account := range connectedAccounts {
@@ -507,9 +549,9 @@ func fetchAndStoreUserData(token, userID string, wg *sync.WaitGroup) {
 		}
 	}
 
-	err = insertUserData(userID, userBio, avatar, banner, accentColor, connectedAccounts, linkedWebsites)
+	err = insertUserData(userID, userBio, avatar, banner, accentColor, username, discriminator, connectedAccounts, linkedWebsites)
 	if err != nil {
-		log.Printf("Error inserting user data for user %s: %v", userID, err)
+		logger.Printf("Error inserting user data for user %s: %v", userID, err)
 		return
 	}
 
@@ -566,7 +608,9 @@ func main() {
 	var wg sync.WaitGroup
 	jobs := make(chan string, len(members))
 	results := make(chan string, len(members))
-	numWorkers := 10
+
+	// Dynamically adjust the number of workers based on system resources
+	numWorkers := runtime.NumCPU() * 2
 
 	for w := 1; w <= numWorkers; w++ {
 		wg.Add(1)
