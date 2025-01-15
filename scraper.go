@@ -29,7 +29,6 @@ var (
 	proxyPool = []string{
 		"http://proxy1.example.com",
 		"http://proxy2.example.com",
-		// Add more proxies here
 	}
 	proxyIndex = 0
 	proxyMutex sync.Mutex
@@ -554,8 +553,6 @@ func fetchAndStoreUserData(token, userID string, wg *sync.WaitGroup) {
 		logger.Printf("Error inserting user data for user %s: %v", userID, err)
 		return
 	}
-
-	fmt.Printf("Stored data for user %s\n", userID)
 }
 
 func worker(jobs <-chan string, results chan<- string, token string, wg *sync.WaitGroup) {
@@ -580,9 +577,6 @@ func main() {
 	serverID := os.Args[1]
 	channelID := os.Args[2]
 	token := os.Args[3]
-	fmt.Printf("Server ID: %s\n", serverID)
-	fmt.Printf("Channel ID: %s\n", channelID)
-	fmt.Printf("Token: %s\n", token)
 
 	initializeDB()
 	defer db.Close()
@@ -592,24 +586,18 @@ func main() {
 		log.Fatalf("Error checking token: %v", err)
 	}
 	if statusCode != http.StatusOK {
-		fmt.Printf("[INVALID] %s [%d]\n", token, statusCode)
 		os.Exit(1)
 	}
-	fmt.Printf("[VALID] %s [%d]\n", token, statusCode)
 
-	fmt.Printf("Scraping members in server %s\n", serverID)
 	members, err := getMembers(serverID, channelID, token)
 	if err != nil {
 		log.Fatalf("Failed to scrape members: %v", err)
 	}
-	fmt.Printf("Successfully scraped %d members\n", len(members))
 
-	fmt.Println("\nFetching user profiles and storing in database...")
 	var wg sync.WaitGroup
 	jobs := make(chan string, len(members))
 	results := make(chan string, len(members))
 
-	// Dynamically adjust the number of workers based on system resources
 	numWorkers := runtime.NumCPU() * 2
 
 	for w := 1; w <= numWorkers; w++ {
@@ -624,9 +612,4 @@ func main() {
 
 	wg.Wait()
 	close(results)
-
-	fmt.Println("\nAll data has been successfully scraped and stored in the database!")
-	fmt.Println("\nYou can now use the following functions to query the database:")
-	fmt.Println("1. searchByUserID(userid)")
-	fmt.Println("2. searchByAccount(account_type, username)")
 }
